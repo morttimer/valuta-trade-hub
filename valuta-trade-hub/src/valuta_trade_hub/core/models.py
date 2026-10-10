@@ -1,9 +1,11 @@
 import hashlib
+import math
 from datetime import datetime
 from os import urandom
 from typing import Self
 
-from .constants import DB_PORTFOLIOS, DB_RATES, DB_USERS, PIVOT_CURRENCY
+from ..core.exceptions import InsufficientFundsError
+from ..infra.settings import SettingsLoader
 from .utils import load_json, save_json
 
 
@@ -14,6 +16,7 @@ class RateInfo:
         self._last_refresh = last_refresh
 
     def convert(self, amount: float, curr_from: str, curr_to: str) -> float:
+        """Конвертирует сумму между валютами через опорную валюту."""
         return (
             amount
             * self._rate_to_pivot(curr_from)
@@ -21,26 +24,32 @@ class RateInfo:
         )
 
     def _rate_to_pivot(self, currency_code: str) -> float:
-        if currency_code == PIVOT_CURRENCY:
+        """Возвращает курс валюты к опорной валюте."""
+        pivot_currency = SettingsLoader().get_pivot_currency()
+        if currency_code == pivot_currency:
             return 1.0
-        return self.find_rate(currency_code, PIVOT_CURRENCY)
+        return self.find_rate(currency_code, pivot_currency)
 
     def find_rate(self, curr_from, curr_to):
+        """Возвращает курс для пары валют."""
         return self._find_rate_entry(curr_from, curr_to).rate
 
     def get_updated_at(self, curr_from: str, curr_to: str) -> datetime:
+        """Возвращает время обновления курса для пары валют."""
+        pivot_currency = SettingsLoader().get_pivot_currency()
         timestamps = [
             datetime.fromisoformat(
-                self._find_rate_entry(code, PIVOT_CURRENCY).updated_at
+                self._find_rate_entry(code, pivot_currency).updated_at
             )
             for code in (curr_from, curr_to)
-            if code != PIVOT_CURRENCY
+            if code != pivot_currency
         ]
         return min(
             timestamps, default=datetime.fromisoformat(self._last_refresh)
         )
 
     def _find_rate_entry(self, curr_from: str, curr_to: str) -> "Rate":
+        """Возвращает запись курса для пары валют."""
         for rate in self._rates:
             if rate.currency_from == curr_from and rate.currency_to == curr_to:
                 return rate
@@ -49,6 +58,10 @@ class RateInfo:
     @property
     def rates(self):
         return self._rates
+
+    @property
+    def last_refresh(self) -> datetime:
+        return datetime.fromisoformat(self._last_refresh)
 
     @staticmethod
     def _parse_currency(key) -> tuple[str, str]:
@@ -62,7 +75,8 @@ class RateInfo:
 
     @classmethod
     def load_rate_info(cls) -> Self:
-        rate_info_json = load_json(DB_RATES)
+        """Загружает курсы валют из хранилища."""
+        rate_info_json = load_json(SettingsLoader().get_db_rates_path())
 
         rates = []
         for key in rate_info_json:
@@ -129,6 +143,7 @@ class User:
 
     @classmethod
     def create_user(cls, user_id: int, username: str, password: str) -> Self:
+        """Создает пользователя с захешированным паролем."""
         User._assert_password_len(password)
         hashed_password, salt = User._generate_pass_and_salt(password)
 
@@ -142,7 +157,8 @@ class User:
 
     @classmethod
     def load_users(cls) -> list[Self]:
-        json_list = load_json(DB_USERS)
+        """Загружает всех пользователей из хранилища."""
+        json_list = load_json(SettingsLoader().get_db_users_path())
         user_list = []
         for user_json in json_list:
             user_list.append(
@@ -185,6 +201,7 @@ class User:
         return self._registration_date
 
     def get_user_info(self) -> str:
+        """Возвращает информацию о пользователе."""
         return self.__str__()
 
     def __str__(self) -> str:
@@ -194,6 +211,7 @@ class User:
         )
 
     def change_password(self, new_password: str) -> None:
+        """Меняет пароль пользователя и сохраняет его."""
         User._assert_password_len(new_password)
         new_salt = urandom(10).hex()
         hashed_password = User._hash_password(new_password, new_salt)
@@ -208,12 +226,14 @@ class User:
             raise ValueError("Пароль должен быть не короче 4 символов")
 
     def verify_password(self, password: str) -> bool:
+        """Проверяет, совпадает ли пароль с сохраненным хешем."""
         return (
             User._hash_password(password, self._salt) == self._hashed_password
         )
 
     def update_user_db(self) -> None:
-        users_info = load_json(DB_USERS)
+        """Сохраняет пользователя в хранилище."""
+        users_info = load_json(SettingsLoader().get_db_users_path())
 
         for user_info in users_info:
             if user_info["user_id"] == self._user_id:
@@ -221,7 +241,7 @@ class User:
                 break
         else:
             users_info.append(self._to_dict())
-        save_json(DB_USERS, users_info)
+        save_json(SettingsLoader().get_db_users_path(), users_info)
 
     def _to_dict(self) -> dict:
         return {
@@ -234,6 +254,7 @@ class User:
 
     @staticmethod
     def _hash_password(new_password, new_salt) -> str:
+        """Возвращает хеш пароля с солью."""
         return hashlib.sha256(
             User._salted_pass(new_password, new_salt)
         ).hexdigest()
@@ -256,6 +277,7 @@ class Wallet:
 
     @classmethod
     def load_wallets(cls, wallets_json) -> dict[str, Self]:
+        """Создает кошельки из данных хранилища."""
         wallet_list = []
         for key, value in wallets_json.items():
             wallet_list.append(cls(key, value["balance"]))
@@ -280,27 +302,30 @@ class Wallet:
         self._balance = float(amount)
 
     def deposit(self, amount: float) -> None:
+        """Пополняет баланс кошелька."""
         Wallet._validate_number(amount)
         if amount <= 0:
             raise ValueError("'amount' должен быть положительным числом")
         self.balance += amount
 
     def withdraw(self, amount: float) -> None:
+        """Списывает сумму с баланса кошелька."""
         Wallet._validate_number(amount)
         if amount <= 0:
             raise ValueError("'amount' должен быть положительным числом")
         if self._balance >= amount:
             self.balance -= amount
         else:
-            raise ValueError(
-                f"Недостаточно средств: доступно {self._balance:.4f} "
-                f"{self._currency_code}, требуется {amount:.4f} "
-                f"{self._currency_code}"
+            raise InsufficientFundsError(
+                self._balance, amount, self._currency_code
             )
 
     def get_total_value(
-        self, rate_info: RateInfo, base_currency: str = "USD"
+        self, rate_info: RateInfo, base_currency: str | None = None
     ) -> float:
+        """Возвращает стоимость кошелька в базовой валюте."""
+        if base_currency is None:
+            base_currency = SettingsLoader().get_default_base_currency()
         return rate_info.convert(
             self._balance, self._currency_code, base_currency
         )
@@ -309,8 +334,11 @@ class Wallet:
     def _validate_number(amount) -> None:
         if isinstance(amount, bool) or not isinstance(amount, (float, int)):
             raise TypeError("'amount' должен быть числом")
+        if not math.isfinite(amount):
+            raise ValueError("'amount' должен быть конечным числом")
 
     def get_balance_info(self) -> str:
+        """Возвращает информацию о балансе кошелька."""
         return self.__str__()
 
     def __str__(self) -> str:
@@ -329,11 +357,13 @@ class Portfolio:
 
     @classmethod
     def create_for_user(cls, user: User) -> Self:
+        """Создает пустой портфель для пользователя."""
         return cls(user.user_id, {})
 
     @classmethod
     def load_portfolios(cls) -> list[Self]:
-        portfolios_json = load_json(DB_PORTFOLIOS)
+        """Загружает все портфели из хранилища."""
+        portfolios_json = load_json(SettingsLoader().get_db_ports_path())
         port_list = []
         for port in portfolios_json:
             port_list.append(
@@ -361,6 +391,7 @@ class Portfolio:
         return dict(self._wallets)
 
     def add_currency(self, currency_code: str) -> Wallet:
+        """Добавляет в портфель пустой кошелек валюты."""
         if currency_code not in self._wallets:
             new_wallet = Wallet(currency_code, 0.0)
             self._wallets[currency_code] = new_wallet
@@ -368,7 +399,8 @@ class Portfolio:
         else:
             raise ValueError(f"Кошелек '{currency_code}' уже есть в портфеле")
 
-    def get_total_value(self, base_currency: str = "USD") -> float:
+    def get_total_value(self, base_currency: str | None = None) -> float:
+        """Возвращает стоимость портфеля в базовой валюте."""
         rate_info = RateInfo.load_rate_info()
         return sum(
             (
@@ -379,6 +411,7 @@ class Portfolio:
         )
 
     def get_wallet(self, currency_code: str) -> Wallet:
+        """Возвращает кошелек портфеля по коду валюты."""
         target_wallet = self._wallets.get(currency_code)
         if not target_wallet:
             raise ValueError(
@@ -389,7 +422,8 @@ class Portfolio:
             return target_wallet
 
     def update_portfolios_db(self) -> None:
-        ports_info = load_json(DB_PORTFOLIOS)
+        """Сохраняет портфель в хранилище."""
+        ports_info = load_json(SettingsLoader().get_db_ports_path())
 
         for port_info in ports_info:
             if port_info["user_id"] == self._user_id:
@@ -397,7 +431,7 @@ class Portfolio:
                 break
         else:
             ports_info.append(self._to_dict())
-        save_json(DB_PORTFOLIOS, ports_info)
+        save_json(SettingsLoader().get_db_ports_path(), ports_info)
 
     def _to_dict(self) -> dict:
         return {

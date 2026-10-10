@@ -3,7 +3,13 @@ import shlex
 from typing import NoReturn
 
 from ..core import usecases
+from ..core.exceptions import (
+    ApiRequestError,
+    CurrencyNotFoundError,
+    InsufficientFundsError,
+)
 from ..core.models import User
+from ..infra.settings import SettingsLoader
 
 
 class CliError(Exception):
@@ -12,13 +18,16 @@ class CliError(Exception):
 
 class ReplArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
+        """Выбрасывает CliError при ошибке разбора аргументов."""
         raise CliError(message)
 
     def exit(self, status: int = 0, message: str | None = None) -> NoReturn:
+        """Выбрасывает CliError вместо завершения программы."""
         raise CliError(message or "")
 
 
 def run() -> None:
+    """Запускает интерактивный цикл команд CLI."""
     parser = _build_parser()
     current_user: User | None = None
 
@@ -60,11 +69,18 @@ def run() -> None:
                     )
                 case "exit":
                     break
+        except InsufficientFundsError as e:
+            print(e)
+        except CurrencyNotFoundError as e:
+            print(f"{e}. См. 'get-rate -h'")
+        except ApiRequestError as e:
+            print(f"{e}. Повторите попытку позже")
         except (ValueError, TypeError) as e:
             print(e)
 
 
 def _build_parser() -> ReplArgumentParser:
+    """Создает парсер команд CLI."""
     parser = ReplArgumentParser(prog="")
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -81,7 +97,9 @@ def _build_parser() -> ReplArgumentParser:
     show_portfolio = commands.add_parser(
         "show-portfolio", help="показать портфель"
     )
-    show_portfolio.add_argument("--base", default="USD")
+    show_portfolio.add_argument(
+        "--base", default=SettingsLoader().get_default_base_currency()
+    )
 
     buy = commands.add_parser("buy", help="купить валюту")
     buy.add_argument("--currency", required=True)

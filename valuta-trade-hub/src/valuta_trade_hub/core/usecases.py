@@ -1,10 +1,16 @@
+import math
 from collections.abc import Callable
+from datetime import datetime
 
-from .constants import PIVOT_CURRENCY
+from ..infra.settings import SettingsLoader
+from .currencies import CurrencyRegistry
+from .decorators import log_action
+from .exceptions import ApiRequestError
 from .models import Portfolio, RateInfo, User, Wallet
 
 
 def register(username: str, password: str) -> str:
+    """Регистрирует пользователя и создает ему пустой портфель."""
     all_users = User.load_users()
     _assert_username_uniq(all_users, username)
     new_user = User.create_user(
@@ -22,6 +28,7 @@ def register(username: str, password: str) -> str:
 
 
 def login(username: str, password: str) -> User:
+    """Аутентифицирует пользователя по имени и паролю."""
     all_users = User.load_users()
     user = next((u for u in all_users if u.username == username), None)
     if user is None:
@@ -35,10 +42,10 @@ def login(username: str, password: str) -> User:
 
 
 def show_portfolio(user: User | None, base: str) -> str:
+    """Возвращает портфель пользователя в базовой валюте."""
     _validate_login(user)
-    _validate_currency_code(base)
+    CurrencyRegistry().get_currency(base)
     rate_info = RateInfo.load_rate_info()
-    _validate_currency(rate_info, base)
     user_port = _load_user_portfolio(user)
 
     if not user_port.wallets:
@@ -56,13 +63,16 @@ def show_portfolio(user: User | None, base: str) -> str:
         return result
 
 
+@log_action("buy")
 def buy(user: User | None, currency: str, amount: float) -> str:
+    """Покупает валюту за счет кошелька опорной валюты."""
     user_port, rate = _prepare_trade(user, currency, amount)
     cost = amount * rate
 
+    pivot_currency = SettingsLoader().get_pivot_currency()
     pivot_change = ""
-    if currency != PIVOT_CURRENCY:
-        pivot_wallet = user_port.get_wallet(PIVOT_CURRENCY)
+    if currency != pivot_currency:
+        pivot_wallet = user_port.get_wallet(pivot_currency)
         pivot_change = _apply_change(pivot_wallet, pivot_wallet.withdraw, cost)
 
     wallet = _get_or_create_wallet(user_port, currency)
@@ -75,11 +85,13 @@ def buy(user: User | None, currency: str, amount: float) -> str:
         amount,
         rate,
         wallet_change + pivot_change,
-        f"Оценочная стоимость покупки: {cost:,.2f} {PIVOT_CURRENCY}",
+        f"Оценочная стоимость покупки: {cost:,.2f} {pivot_currency}",
     )
 
 
+@log_action("sell")
 def sell(user: User | None, currency: str, amount: float) -> str:
+    """Продает валюту с зачислением выручки в опорную валюту."""
     user_port, rate = _prepare_trade(user, currency, amount)
     revenue = amount * rate
 
@@ -87,8 +99,9 @@ def sell(user: User | None, currency: str, amount: float) -> str:
     wallet_change = _apply_change(wallet, wallet.withdraw, amount)
 
     pivot_change = ""
-    if currency != PIVOT_CURRENCY:
-        pivot_wallet = _get_or_create_wallet(user_port, PIVOT_CURRENCY)
+    pivot_currency = SettingsLoader().get_pivot_currency()
+    if currency != pivot_currency:
+        pivot_wallet = _get_or_create_wallet(user_port, pivot_currency)
         pivot_change = _apply_change(
             pivot_wallet, pivot_wallet.deposit, revenue
         )
@@ -100,14 +113,18 @@ def sell(user: User | None, currency: str, amount: float) -> str:
         amount,
         rate,
         wallet_change + pivot_change,
-        f"Оценочная выручка: {revenue:,.2f} {PIVOT_CURRENCY}",
+        f"Оценочная выручка: {revenue:,.2f} {pivot_currency}",
     )
 
 
 def get_rate(from_currency: str, to_currency: str) -> str:
-    _validate_currency_code(from_currency)
-    _validate_currency_code(to_currency)
+    """Возвращает прямой и обратный курс между валютами."""
+    registry = CurrencyRegistry()
+    registry.get_currency(from_currency)
+    registry.get_currency(to_currency)
     rate_info = RateInfo.load_rate_info()
+    if _is_cache_stale(rate_info):
+        rate_info = _refresh_rates()
     try:
         rate = rate_info.convert(1.0, from_currency, to_currency)
         updated_at = rate_info.get_updated_at(from_currency, to_currency)
@@ -131,23 +148,30 @@ def _assert_username_uniq(users, new_name):
 
 
 def _get_next_id(items, id_field_name):
+    """Возвращает следующий свободный идентификатор."""
     all_ids = [getattr(item, id_field_name) for item in items]
     return max(all_ids) + 1 if all_ids else 1
 
 
-def _validate_currency(rate_info: RateInfo, currency: str) -> None:
-    try:
-        rate_info.convert(1.0, currency, PIVOT_CURRENCY)
-    except ValueError as e:
-        raise ValueError(f"Неизвестная базовая валюта '{currency}'") from e
+def _is_cache_stale(rate_info: RateInfo) -> bool:
+    """Проверяет, устарел ли кеш курсов."""
+    age = datetime.now() - rate_info.last_refresh
+    return age.total_seconds() > SettingsLoader().get_rates_ttl_seconds()
+
+
+def _refresh_rates() -> RateInfo:
+    """Обновляет кеш курсов."""
+    raise ApiRequestError("сервис обновления курсов недоступен")
 
 
 def _prepare_trade(
     user: User | None, currency: str, amount: float
 ) -> tuple[Portfolio, float]:
+    """Проверяет данные сделки и возвращает портфель и курс."""
     _validate_login(user)
-    _validate_currency_code(currency)
-    rate = RateInfo.load_rate_info().convert(1.0, currency, PIVOT_CURRENCY)
+    CurrencyRegistry().get_currency(currency)
+    pivot_currency = SettingsLoader().get_pivot_currency()
+    rate = RateInfo.load_rate_info().convert(1.0, currency, pivot_currency)
     _validate_amount(amount)
     return _load_user_portfolio(user), rate
 
@@ -169,12 +193,14 @@ def _validate_amount(amount: float) -> None:
     if (
         isinstance(amount, bool)
         or not isinstance(amount, (int, float))
+        or not math.isfinite(amount)
         or amount <= 0
     ):
         raise ValueError("'amount' должен быть положительным числом")
 
 
 def _get_or_create_wallet(portfolio: Portfolio, currency: str) -> Wallet:
+    """Возвращает кошелек валюты, создавая его при отсутствии."""
     wallet = portfolio.wallets.get(currency)
     if wallet is None:
         wallet = portfolio.add_currency(currency)
@@ -184,6 +210,7 @@ def _get_or_create_wallet(portfolio: Portfolio, currency: str) -> Wallet:
 def _apply_change(
     wallet: Wallet, operation: Callable[[float], None], amount: float
 ) -> str:
+    """Применяет операцию к кошельку и описывает изменение баланса."""
     balance_before = wallet.balance
     operation(amount)
     return (
@@ -200,22 +227,17 @@ def _format_trade(
     changes: str,
     summary: str,
 ) -> str:
+    """Форматирует сообщение о выполненной сделке."""
+    pivot_currency = SettingsLoader().get_pivot_currency()
     return (
         f"{action} выполнена: {amount:.4f} {currency} по курсу "
-        f"{rate:,.2f} {PIVOT_CURRENCY}/{currency}\n"
+        f"{rate:,.2f} {pivot_currency}/{currency}\n"
         "Изменения в портфеле:\n"
         f"{changes}"
         f"{summary}"
     )
 
 
-def _validate_currency_code(currency: str) -> None:
-    if not currency or not currency.isupper():
-        raise ValueError(
-            "Код валюты должен быть непустой строкой в верхнем регистре: "
-            f"'{currency}'"
-        )
-
-
 def _format_rate(rate: float) -> str:
+    """Форматирует курс для вывода."""
     return f"{rate:.8f}" if rate < 1 else f"{rate:,.2f}"

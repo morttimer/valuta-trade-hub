@@ -4,6 +4,7 @@ from typing import Any
 
 
 def load_json(path: Path) -> Any:
+    """Читает данные из JSON-файла."""
     try:
         with path.open(encoding="utf-8") as file:
             return json.load(file)
@@ -14,5 +15,6 @@ def load_json(path: Path) -> Any:
 
 
 def save_json(path: Path, data: list) -> None:
+    """Записывает данные в JSON-файл."""
     with path.open(mode="w", encoding="utf-8") as file:
         json.dump(data, file, indent=2, ensure_ascii=False)
