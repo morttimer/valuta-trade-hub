@@ -4,6 +4,8 @@ from .exceptions import CurrencyNotFoundError
 
 
 class Currency(ABC):
+    """Базовый класс валюты."""
+
     def __init__(self, curr_name: str, curr_code: str) -> None:
         self.name = curr_name
         self.code = curr_code
@@ -53,6 +55,8 @@ class Currency(ABC):
 
 
 class CurrencyRegistry:
+    """Реестр поддерживаемых валют."""
+
     def __init__(self):
         self._currencies = []
         self.add_currency(FiatCurrency("US Dollar", "USD", "United States"))
@@ -60,6 +64,12 @@ class CurrencyRegistry:
         self.add_currency(FiatCurrency("Russian Ruble", "RUB", "Russia"))
         self.add_currency(CryptoCurrency("Bitcoin", "BTC", "SHA-256", 1.12e12))
         self.add_currency(CryptoCurrency("Ethereum", "ETH", "Ethash", 4.5e11))
+        self.add_currency(
+            FiatCurrency("British Pound", "GBP", "United Kingdom")
+        )
+        self.add_currency(
+            CryptoCurrency("Solana", "SOL", "Proof of History", 6.0e10)
+        )
 
     def add_currency(self, currency: Currency) -> None:
         """Добавляет валюту в реестр."""
@@ -77,6 +87,8 @@ class CurrencyRegistry:
 
 
 class FiatCurrency(Currency):
+    """Фиатная валюта."""
+
     def __init__(
         self, curr_name: str, curr_code: str, curr_issuer: str
     ) -> None:
@@ -107,6 +119,8 @@ class FiatCurrency(Currency):
 
 
 class CryptoCurrency(Currency):
+    """Криптовалюта."""
+
     def __init__(
         self, curr_name: str, curr_code: str, crypto_algo: str, last_cap: float
     ) -> None:

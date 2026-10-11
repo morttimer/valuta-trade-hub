@@ -1,13 +1,15 @@
 [project]
 name = "valuta-trade-hub"
 version = "0.1.0"
-description = "Add your description here"
+description = "Интерактивное приложение для обмена валют"
 readme = "README.md"
 authors = [
     { name = "kbobkov", email = "godrmortt@yandex.ru" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "requests>=2.34.2",
+]
 
 [project.scripts]
 valuta-trade-hub = "valuta_trade_hub.cli.interface:run"

@@ -10,13 +10,18 @@ from ..core.exceptions import (
 )
 from ..core.models import User
 from ..infra.settings import SettingsLoader
+from ..logging_config import setup_parser_logging
 
 
 class CliError(Exception):
+    """Ошибка разбора команды CLI."""
+
     pass
 
 
 class ReplArgumentParser(argparse.ArgumentParser):
+    """Парсер аргументов, не завершающий программу при ошибках."""
+
     def error(self, message: str) -> NoReturn:
         """Выбрасывает CliError при ошибке разбора аргументов."""
         raise CliError(message)
@@ -28,8 +33,11 @@ class ReplArgumentParser(argparse.ArgumentParser):
 
 def run() -> None:
     """Запускает интерактивный цикл команд CLI."""
+    setup_parser_logging()
     parser = _build_parser()
     current_user: User | None = None
+    scheduler = usecases.create_rates_scheduler()
+    scheduler.start()
 
     while True:
         try:
@@ -67,6 +75,12 @@ def run() -> None:
                     print(
                         usecases.get_rate(args.from_currency, args.to_currency)
                     )
+                case "update-rates":
+                    print(usecases.update_rates(args.source))
+                case "show-rates":
+                    print(
+                        usecases.show_rates(args.currency, args.top, args.base)
+                    )
                 case "exit":
                     break
         except InsufficientFundsError as e:
@@ -77,6 +91,9 @@ def run() -> None:
             print(f"{e}. Повторите попытку позже")
         except (ValueError, TypeError) as e:
             print(e)
+
+    if scheduler.is_running:
+        scheduler.stop()
 
 
 def _build_parser() -> ReplArgumentParser:
@@ -112,6 +129,20 @@ def _build_parser() -> ReplArgumentParser:
     get_rate = commands.add_parser("get-rate", help="показать курс валюты")
     get_rate.add_argument("--from", dest="from_currency", required=True)
     get_rate.add_argument("--to", dest="to_currency", required=True)
+
+    update_rates = commands.add_parser(
+        "update-rates", help="обновить курсы валют"
+    )
+    update_rates.add_argument(
+        "--source", choices=("coingecko", "exchangerate"), default=None
+    )
+
+    show_rates = commands.add_parser(
+        "show-rates", help="показать курсы из кеша"
+    )
+    show_rates.add_argument("--currency")
+    show_rates.add_argument("--top", type=int)
+    show_rates.add_argument("--base")
 
     commands.add_parser("exit", help="выйти из программы")
 

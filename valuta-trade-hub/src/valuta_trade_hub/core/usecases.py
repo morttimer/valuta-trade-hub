@@ -2,11 +2,22 @@ import math
 from collections.abc import Callable
 from datetime import datetime
 
+from ..decorators import log_action
 from ..infra.settings import SettingsLoader
-from .currencies import CurrencyRegistry
-from .decorators import log_action
-from .exceptions import ApiRequestError
+from ..parser_service.api_clients import CoinGeckoClient, ExchangeRateApiClient
+from ..parser_service.config import ParserConfig
+from ..parser_service.scheduler import RatesScheduler
+from ..parser_service.storage import RatesStorage
+from ..parser_service.updater import RatesUpdater, UpdateResult
+from .currencies import CryptoCurrency, CurrencyRegistry
+from .exceptions import ApiRequestError, CurrencyNotFoundError
 from .models import Portfolio, RateInfo, User, Wallet
+from .utils import to_iso
+
+RATE_SOURCES = {
+    "coingecko": CoinGeckoClient,
+    "exchangerate": ExchangeRateApiClient,
+}
 
 
 def register(username: str, password: str) -> str:
@@ -142,6 +153,62 @@ def get_rate(from_currency: str, to_currency: str) -> str:
     )
 
 
+def update_rates(source: str | None = None) -> str:
+    """Обновляет кеш курсов из внешних API."""
+    result = _run_rates_update(source)
+    if result.errors or result.updated_count == 0:
+        return (
+            "Update completed with errors. "
+            f"Total rates updated: {result.updated_count}."
+        )
+    return (
+        f"Update successful. Total rates updated: {result.updated_count}. "
+        f"Last refresh: {result.last_refresh}"
+    )
+
+
+def create_rates_scheduler() -> RatesScheduler:
+    """Создает планировщик обновления курсов из всех источников."""
+    return RatesScheduler(
+        _create_rates_updater(None), SettingsLoader().get_rates_ttl_seconds()
+    )
+
+
+def show_rates(
+    currency: str | None = None,
+    top: int | None = None,
+    base: str | None = None,
+) -> str:
+    """Возвращает курсы из локального кеша с учетом фильтров."""
+    rate_info = _load_cached_rates()
+    pivot_currency = SettingsLoader().get_pivot_currency()
+    cached_codes = {rate.currency_from for rate in rate_info.rates}
+    if base is None:
+        base = pivot_currency
+    else:
+        CurrencyRegistry().get_currency(base)
+        if base != pivot_currency and base not in cached_codes:
+            raise ValueError(f"Курс для '{base}' не найден в кеше.")
+
+    codes = sorted((cached_codes | {pivot_currency}) - {base})
+    if currency is not None:
+        if currency not in codes:
+            raise ValueError(f"Курс для '{currency}' не найден в кеше.")
+        codes = [currency]
+
+    rates = [(code, rate_info.convert(1.0, code, base)) for code in codes]
+    if top is not None:
+        if top <= 0:
+            raise ValueError("'top' должен быть положительным числом")
+        registry = CurrencyRegistry()
+        crypto_rates = [r for r in rates if _is_crypto(registry, r[0])]
+        rates = sorted(crypto_rates, key=lambda r: r[1], reverse=True)[:top]
+
+    lines = [f"Курсы из кеша (обновлено: {to_iso(rate_info.last_refresh)}):"]
+    lines += [f"- {code}_{base}: {_format_rate(rate)}" for code, rate in rates]
+    return "\n".join(lines)
+
+
 def _assert_username_uniq(users, new_name):
     if any(u.username == new_name for u in users):
         raise ValueError(f"Имя пользователя '{new_name}' уже занято")
@@ -155,13 +222,55 @@ def _get_next_id(items, id_field_name):
 
 def _is_cache_stale(rate_info: RateInfo) -> bool:
     """Проверяет, устарел ли кеш курсов."""
+    if rate_info.last_refresh is None:
+        return True
     age = datetime.now() - rate_info.last_refresh
     return age.total_seconds() > SettingsLoader().get_rates_ttl_seconds()
 
 
 def _refresh_rates() -> RateInfo:
     """Обновляет кеш курсов."""
-    raise ApiRequestError("сервис обновления курсов недоступен")
+    if _run_rates_update(None).updated_count == 0:
+        raise ApiRequestError("не удалось обновить устаревший кеш курсов")
+    return RateInfo.load_rate_info()
+
+
+def _run_rates_update(source: str | None) -> UpdateResult:
+    """Запускает обновление курсов из всех или одного источника."""
+    return _create_rates_updater(source).run_update()
+
+
+def _create_rates_updater(source: str | None) -> RatesUpdater:
+    """Создает RatesUpdater для всех или одного источника курсов."""
+    config = ParserConfig()
+    client_classes = (
+        RATE_SOURCES.values() if source is None else [RATE_SOURCES[source]]
+    )
+    clients = [client_class(config) for client_class in client_classes]
+    return RatesUpdater(clients, RatesStorage(config))
+
+
+def _load_cached_rates() -> RateInfo:
+    """Загружает курсы из кеша или сообщает, что кеш пуст."""
+    empty_message = (
+        "Локальный кеш курсов пуст. "
+        "Выполните 'update-rates', чтобы загрузить данные."
+    )
+    try:
+        rate_info = RateInfo.load_rate_info()
+    except (FileNotFoundError, ValueError, KeyError) as e:
+        raise ValueError(empty_message) from e
+    if not rate_info.rates:
+        raise ValueError(empty_message)
+    return rate_info
+
+
+def _is_crypto(registry: CurrencyRegistry, code: str) -> bool:
+    """Проверяет, является ли валюта криптовалютой."""
+    try:
+        return isinstance(registry.get_currency(code), CryptoCurrency)
+    except CurrencyNotFoundError:
+        return False
 
 
 def _prepare_trade(

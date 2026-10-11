@@ -1,11 +1,11 @@
-import datetime
 import inspect
 import json
 from functools import wraps
 from pathlib import Path
 
-from ..infra.settings import SettingsLoader
-from .constants import LOG_JSON_FILE, LOG_STRING_FILE
+from .core.constants import LOG_JSON_FILE, LOG_STRING_FILE
+from .core.utils import now_iso
+from .infra.settings import SettingsLoader
 
 
 def log_action(action_name, level=None):
@@ -33,7 +33,7 @@ def log_action(action_name, level=None):
                 user = params.get("user")
                 log_line_dict = {
                     "log_level": log_level,
-                    "current_datetime": datetime.datetime.now().isoformat(),
+                    "current_datetime": now_iso(),
                     "action_name": action_name.upper(),
                     "username": user.username if user else None,
                     "currency": params.get("currency"),

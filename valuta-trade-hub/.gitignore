@@ -16,3 +16,6 @@ htmlcov/
 .vscode/
 *.swp
 .DS_Store
+
+ascii/
+data/

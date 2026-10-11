@@ -6,13 +6,15 @@ from typing import Self
 
 from ..core.exceptions import InsufficientFundsError
 from ..infra.settings import SettingsLoader
-from .utils import load_json, save_json
+from .constants import EMPTY_RATES
+from .utils import load_json, save_json, to_iso
 
 
 class RateInfo:
-    def __init__(self, rates, source, last_refresh):
+    """Снимок курсов валют из кеша."""
+
+    def __init__(self, rates, last_refresh):
         self._rates = rates
-        self._source = source
         self._last_refresh = last_refresh
 
     def convert(self, amount: float, curr_from: str, curr_to: str) -> float:
@@ -44,9 +46,7 @@ class RateInfo:
             for code in (curr_from, curr_to)
             if code != pivot_currency
         ]
-        return min(
-            timestamps, default=datetime.fromisoformat(self._last_refresh)
-        )
+        return min(timestamps, default=self.last_refresh)
 
     def _find_rate_entry(self, curr_from: str, curr_to: str) -> "Rate":
         """Возвращает запись курса для пары валют."""
@@ -60,7 +60,9 @@ class RateInfo:
         return self._rates
 
     @property
-    def last_refresh(self) -> datetime:
+    def last_refresh(self) -> datetime | None:
+        if self._last_refresh is None:
+            return None
         return datetime.fromisoformat(self._last_refresh)
 
     @staticmethod
@@ -76,37 +78,62 @@ class RateInfo:
     @classmethod
     def load_rate_info(cls) -> Self:
         """Загружает курсы валют из хранилища."""
-        rate_info_json = load_json(SettingsLoader().get_db_rates_path())
+        rate_info_json = load_json(
+            SettingsLoader().get_db_rates_path(), EMPTY_RATES
+        )
 
         rates = []
-        for key in rate_info_json:
+        for key in rate_info_json["pairs"]:
             if RateInfo._is_rate_entry(key):
                 currency_from, currency_to = RateInfo._parse_currency(key)
                 rates.append(
                     Rate(
                         currency_from,
                         currency_to,
-                        rate_info_json[key]["rate"],
-                        rate_info_json[key]["updated_at"],
+                        rate_info_json["pairs"][key]["rate"],
+                        rate_info_json["pairs"][key]["updated_at"],
+                        rate_info_json["pairs"][key]["source"],
                     )
                 )
-        return cls(
-            rates, rate_info_json["source"], rate_info_json["last_refresh"]
-        )
+        return cls(rates, rate_info_json["last_refresh"])
+
+    @staticmethod
+    def save_rates(rates: dict) -> None:
+        """Сохраняет снимок курсов в rates.json."""
+        save_json(SettingsLoader().get_db_rates_path(), rates)
+
+    def to_dict(self) -> dict:
+        """Возвращает снимок курсов в формате rates.json."""
+        result = dict()
+        result["pairs"] = dict()
+        for rate in self._rates:
+            result["pairs"][f"{rate.currency_from}_{rate.currency_to}"] = {
+                "rate": rate.rate,
+                "updated_at": rate.updated_at,
+                "source": rate.source,
+            }
+        result["last_refresh"] = self._last_refresh
+        return result
 
 
 class Rate:
-    def __init__(self, currency_from, currency_to, rate, updated_at) -> None:
+    """Курс валютной пары."""
+
+    def __init__(
+        self, currency_from, currency_to, rate, updated_at, source
+    ) -> None:
         self._currency_from = currency_from
         self._currency_to = currency_to
         self._rate = rate
         self._updated_at = updated_at
+        self._source = source
 
     def __str__(self):
         return (
             f"Currency_from: {self._currency_from}, "
             f"currency_to: {self._currency_to}, "
-            f"rate: {self._rate}, updated_at: {self._updated_at}"
+            f"rate: {self._rate}, updated_at: {self._updated_at},"
+            f"source: {self._source}"
         )
 
     @property
@@ -125,8 +152,14 @@ class Rate:
     def updated_at(self) -> str:
         return self._updated_at
 
+    @property
+    def source(self) -> str:
+        return self._source
+
 
 class User:
+    """Пользователь платформы."""
+
     def __init__(
         self,
         user_id: int,
@@ -158,7 +191,7 @@ class User:
     @classmethod
     def load_users(cls) -> list[Self]:
         """Загружает всех пользователей из хранилища."""
-        json_list = load_json(SettingsLoader().get_db_users_path())
+        json_list = load_json(SettingsLoader().get_db_users_path(), [])
         user_list = []
         for user_json in json_list:
             user_list.append(
@@ -233,7 +266,7 @@ class User:
 
     def update_user_db(self) -> None:
         """Сохраняет пользователя в хранилище."""
-        users_info = load_json(SettingsLoader().get_db_users_path())
+        users_info = load_json(SettingsLoader().get_db_users_path(), [])
 
         for user_info in users_info:
             if user_info["user_id"] == self._user_id:
@@ -249,7 +282,7 @@ class User:
             "username": self._username,
             "hashed_password": self._hashed_password,
             "salt": self._salt,
-            "registration_date": self._registration_date.isoformat(),
+            "registration_date": to_iso(self._registration_date),
         }
 
     @staticmethod
@@ -265,6 +298,8 @@ class User:
 
 
 class Wallet:
+    """Кошелек пользователя в одной валюте."""
+
     def __init__(self, currency_code: str, balance: float = 0.0) -> None:
         self._currency_code = currency_code
         self.balance = balance
@@ -346,6 +381,8 @@ class Wallet:
 
 
 class Portfolio:
+    """Портфель кошельков пользователя."""
+
     def __init__(
         self, user_id: int, wallets: dict[str, Wallet] | None = None
     ) -> None:
@@ -363,7 +400,7 @@ class Portfolio:
     @classmethod
     def load_portfolios(cls) -> list[Self]:
         """Загружает все портфели из хранилища."""
-        portfolios_json = load_json(SettingsLoader().get_db_ports_path())
+        portfolios_json = load_json(SettingsLoader().get_db_ports_path(), [])
         port_list = []
         for port in portfolios_json:
             port_list.append(
@@ -423,7 +460,7 @@ class Portfolio:
 
     def update_portfolios_db(self) -> None:
         """Сохраняет портфель в хранилище."""
-        ports_info = load_json(SettingsLoader().get_db_ports_path())
+        ports_info = load_json(SettingsLoader().get_db_ports_path(), [])
 
         for port_info in ports_info:
             if port_info["user_id"] == self._user_id:
