@@ -38,9 +38,8 @@ class RatesScheduler:
 
     def _run(self) -> None:
         """Выполняет обновление курсов с заданным интервалом до остановки."""
-        while not self._stop_event.is_set():
+        while not self._stop_event.wait(self._interval_seconds):
             try:
                 self._updater.run_update()
             except Exception:
                 logger.exception("Scheduled rates update failed")
-            self._stop_event.wait(self._interval_seconds)

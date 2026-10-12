@@ -167,6 +167,12 @@ def update_rates(source: str | None = None) -> str:
     )
 
 
+def refresh_rates_if_stale() -> None:
+    """Обновляет кеш курсов, если он устарел."""
+    if _is_cache_stale(RateInfo.load_rate_info()):
+        _run_rates_update(None)
+
+
 def create_rates_scheduler() -> RatesScheduler:
     """Создает планировщик обновления курсов из всех источников."""
     return RatesScheduler(

@@ -36,6 +36,7 @@ def run() -> None:
     setup_parser_logging()
     parser = _build_parser()
     current_user: User | None = None
+    usecases.refresh_rates_if_stale()
     scheduler = usecases.create_rates_scheduler()
     scheduler.start()
 
